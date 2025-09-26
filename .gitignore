@@ -1,0 +1,49 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+.eggs/
+
+# === Virtualenv / venv ===
+env/
+venv/
+ENV/
+.venv/
+
+# === IDE & Editors ===
+.vscode/
+.idea/
+*.swp
+
+# === Logs & caches ===
+*.log
+*.pot
+*.mo
+*.db
+*.sqlite3
+
+# === Jupyter Notebooks checkpoints ===
+.ipynb_checkpoints/
+
+# === OS files ===
+.DS_Store
+Thumbs.db
+
+# === Pytest / Coverage ===
+.coverage
+htmlcov/
+.tox/
+.pytest_cache/
+
+# === Docker ===
+*.pid
+*.seed
+*.bak
+
+# === Data & backups ===
+data/database/backups/
+data/logs/
