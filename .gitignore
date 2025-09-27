@@ -48,17 +48,6 @@ htmlcov/
 data/database/backups/
 data/logs/
 
-# Supprimer le fichier du suivi Git (mais pas du disque dur)
-git rm --cached chatbot_auto_apprenant/data/knowledge/wiktextract/fr-extract.jsonl.gz
-
-# Ajouter le chemin au fichier .gitignore
-echo "chatbot_auto_apprenant/data/knowledge/wiktextract/fr-extract.jsonl.gz" >> .gitignore
-
-# Ajouter .gitignore à Git
-git add .gitignore
-
-# Commit des changements
-git commit -m "Ignore large dataset file"
-
-# Push vers GitHub
-git push origin master
+# === Heavy data you don't want in Git ===
+chatbot_auto_apprenant/data/knowledge/fr-extract.jsonl.gz
+chatbot_auto_apprenant/data/knowledge/wiktextract/
