@@ -2,9 +2,14 @@ import sqlite3
 from src.nlp.text_processor import normalize
 from src.learning.similarity_engine import jaccard, order_score, confidence
 from src.core.config import THRESHOLDS, WEIGHTS
+import json
+from collections import deque
+from typing import Optional
 
 DB_PATH = r"data\database\chatbot.db"
 CACHE = {}
+HISTORY = deque(maxlen=10)   # mémorise les 10 derniers tours (texte brut)
+LAST_TOPIC = None            # sujet résolu (texte) du dernier tour utile
 
 
 def candidate_rows_by_index(user_query, limit=50):
@@ -39,6 +44,20 @@ def candidate_rows_by_index(user_query, limit=50):
         )
         return cur.fetchall()
 
+def get_ranked(user_query, limit=50):
+    """Retourne la liste classée des candidats [(sfinal, pid, q, a, slex, sord, sconf), ...]."""
+    tq = normalize(user_query)
+    rows = candidate_rows_by_index(user_query, limit=limit)
+    ranked = []
+    for (pid, q, a, up, down) in rows:
+        tqb = normalize(q)
+        slex = jaccard(tq, tqb)
+        sord = order_score(tq, tqb)
+        sconf = confidence(up, down)
+        sfinal = WEIGHTS["LEX"]*slex + WEIGHTS["ORD"]*sord + WEIGHTS["CONF"]*sconf
+        ranked.append((sfinal, pid, q, a, slex, sord, sconf))
+    ranked.sort(reverse=True)
+    return ranked
 
 def best_match(user_query):
     tq = normalize(user_query)
@@ -83,6 +102,19 @@ def log_decision(user_query, chosen_pair_id, action, score):
         )
         conn.commit()
 
+def log_ambiguity(user_query, candidates):
+    """candidates: liste de dicts {'pid':int,'score':float,'question':str}"""
+    payload = json.dumps(candidates, ensure_ascii=False)
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO ambiguity_events(user_query, candidates_json) VALUES (?, ?)",
+            (user_query, payload),
+        )
+        conn.commit()
+
+
+
 
 def upvote(pair_id):
     with sqlite3.connect(DB_PATH) as conn:
@@ -125,6 +157,24 @@ def learn_pair(question_text, answer_text):
     CACHE.pop(key, None)
     return new_id
 
+ELLIPTIC_TRIGGERS = {
+    "capitale","population","taille","superficie","hauteur","longueur",
+    "age","année","date","prix","cout","coût","definition","définition"
+}
+
+def resolve_context(user_q: str, last_topic: Optional[str]):
+    """Retourne (query_resolue, used_context: bool)"""
+    q_clean = user_q.strip().lower()
+
+    # Triggers basiques: début par "et", ou question très courte, ou mots-clés seuls
+    few_tokens = len(normalize(q_clean)) <= 2
+    starts_and = q_clean.startswith("et ") or q_clean in {"et", "et?"}
+    keywords_only = any(k in normalize(q_clean) for k in ELLIPTIC_TRIGGERS)
+
+    if last_topic and (few_tokens or starts_and or keywords_only):
+        resolved = f"{last_topic} {user_q}"
+        return resolved, True
+    return user_q, False
 
 if __name__ == "__main__":
     print("Chat prêt. Tape 'quit' pour sortir.\n")
@@ -133,21 +183,57 @@ if __name__ == "__main__":
         if q.lower() in {"quit", "exit", ":q"}:
             break
 
-        top = best_match(q)
-        if not top:
+                # Classement complet pour gérer aussi les cas ambigus
+        ranked = get_ranked(q, limit=50)
+
+        if not ranked:
             print("Base vide → LEARN")
             action = "LEARN"; sfinal = 0.0; pid = None; answer = None
         else:
-            sfinal, pid, qbase, answer, slex, sord, sconf = top
-            action = decide(sfinal)
-            print(f"\nDecision: {action} (score={sfinal:.3f})")
-            print(f" - Jaccard={slex:.3f}, Ordre={sord:.3f}, Confiance={sconf:.3f}")
-            if action in {"DIRECT", "CONFIRM"}:
-                print(f"\nRéponse candidate:\n{answer}")
-            elif action == "ASK_REPHRASE":
-                print("\nPeux-tu reformuler ?")
+            sfinal, pid, qbase, answer, slex, sord, sconf = ranked[0]
+
+            # Détection d'ambiguïté si le #2 est très proche du #1
+            ambiguous = False
+            if len(ranked) > 1:
+                s2, pid2, q2, a2, *_ = ranked[1]
+                if (sfinal >= THRESHOLDS["ASK_REPHRASE"]) and (abs(sfinal - s2) < 0.05):
+                    ambiguous = True
+
+            if ambiguous:
+                print("\nAmbiguïté détectée entre deux réponses proches.")
+                print(f"1) {a2 if len(a2)<=120 else a2[:117]+'...'}  (score≈{s2:.3f})")
+                print(f"2) {answer if len(answer)<=120 else answer[:117]+'...'}  (score≈{sfinal:.3f})")
+                sel = input("Choisis 1 / 2 (ou 0 pour aucune) : ").strip()
+
+                # Journalise l'ambiguïté (pour analyse ultérieure)
+                log_ambiguity(q, [
+                    {"pid": int(pid2), "score": float(s2), "question": q2},
+                    {"pid": int(pid),  "score": float(sfinal), "question": qbase},
+                ])
+
+                if sel == "1":
+                    # bascule sur le second candidat
+                    pid, answer, sfinal = pid2, a2, s2
+                    action = "CONFIRM"
+                    print(f"\nRéponse choisie (#1):\n{answer}")
+                elif sel == "2":
+                    action = "CONFIRM"
+                    print(f"\nRéponse choisie (#2):\n{answer}")
+                else:
+                    action = "LEARN"
+                    print("\nJe ne sais pas encore. Enseigne-moi la réponse.")
             else:
-                print("\nJe ne sais pas encore. Enseigne-moi la réponse.")
+                # Flux standard
+                action = decide(sfinal)
+                print(f"\nDecision: {action} (score={sfinal:.3f})")
+                print(f" - Jaccard={slex:.3f}, Ordre={sord:.3f}, Confiance={sconf:.3f}")
+                if action in {"DIRECT", "CONFIRM"}:
+                    print(f"\nRéponse candidate:\n{answer}")
+                elif action == "ASK_REPHRASE":
+                    print("\nPeux-tu reformuler ?")
+                else:
+                    print("\nJe ne sais pas encore. Enseigne-moi la réponse.")
+
 
         # Log de la décision
         chosen_pair = pid if action in {"DIRECT", "CONFIRM"} else None
